@@ -1,0 +1,515 @@
+(() => {
+  'use strict';
+
+  // ---------- DOM ----------
+  const originInput = document.getElementById('originInput');
+  const destInput = document.getElementById('destInput');
+  const originSuggestions = document.getElementById('originSuggestions');
+  const destSuggestions = document.getElementById('destSuggestions');
+  const useMyLocationBtn = document.getElementById('useMyLocationBtn');
+  const radiusSlider = document.getElementById('radiusSlider');
+  const radiusValue = document.getElementById('radiusValue');
+  const routeBtn = document.getElementById('routeBtn');
+  const trackBtn = document.getElementById('trackBtn');
+  const setupError = document.getElementById('setupError');
+  const speedValue = document.getElementById('speedValue');
+  const distanceValue = document.getElementById('distanceValue');
+  const etaValue = document.getElementById('etaValue');
+  const progressFill = document.getElementById('progressFill');
+  const progressPct = document.getElementById('progressPct');
+  const gpsStatus = document.getElementById('gpsStatus');
+  const gpsStatusText = document.getElementById('gpsStatusText');
+  const mapPulse = document.getElementById('mapPulse');
+  const arrivalModal = document.getElementById('arrivalModal');
+  const arrivalSub = document.getElementById('arrivalSub');
+  const stopAlarmBtn = document.getElementById('stopAlarmBtn');
+
+  // ---------- State ----------
+  const state = {
+    origin: null,        // { lat, lon, label }
+    destination: null,   // { lat, lon, label }
+    radius: 100,          // metres
+    tracking: false,
+    arrived: false,
+    watchId: null,
+    lastFix: null,        // { lat, lon, t }
+    displaySpeed: 0,
+    initialDistance: null,
+  };
+
+  let audioCtx = null;
+  let alarmInterval = null;
+  let vibrateInterval = null;
+
+  // ---------- Map setup ----------
+  const map = L.map('map', {
+    zoomControl: false,
+    attributionControl: false,
+    dragging: false,
+    scrollWheelZoom: false,
+    doubleClickZoom: false,
+    touchZoom: false,
+    boxZoom: false,
+    keyboard: false,
+    fadeAnimation: true,
+  }).setView([20, 0], 2);
+
+  L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+    maxZoom: 19,
+    subdomains: 'abc',
+  }).addTo(map);
+
+  let userMarker = null;
+  let destMarker = null;
+  let routeLine = null;
+
+  function userArrowIcon(headingDeg) {
+    const rot = Number.isFinite(headingDeg) ? headingDeg : 0;
+    return L.divIcon({
+      className: '',
+      html: `
+        <div class="user-arrow" style="transform: rotate(${rot}deg)">
+          <div class="halo"></div>
+          <svg width="26" height="26" viewBox="0 0 24 24">
+            <path d="M12 1.5 L19.5 21 L12 16.8 L4.5 21 Z" fill="#F5A623" stroke="#1a1206" stroke-width="1"/>
+          </svg>
+        </div>`,
+      iconSize: [30, 30],
+      iconAnchor: [15, 15],
+    });
+  }
+
+  const destPinIcon = L.divIcon({
+    className: '',
+    html: `
+      <div class="dest-pin">
+        <svg width="26" height="34" viewBox="0 0 24 32">
+          <path d="M12 0C5.4 0 0 5.4 0 12c0 9 12 20 12 20s12-11 12-20C24 5.4 18.6 0 12 0z" fill="#2DD4BF"/>
+          <circle cx="12" cy="12" r="5" fill="#0d1424"/>
+        </svg>
+      </div>`,
+    iconSize: [26, 34],
+    iconAnchor: [13, 32],
+  });
+
+  // ---------- Helpers ----------
+  function haversineMeters(lat1, lon1, lat2, lon2) {
+    const R = 6371000;
+    const toRad = (d) => (d * Math.PI) / 180;
+    const dLat = toRad(lat2 - lat1);
+    const dLon = toRad(lon2 - lon1);
+    const a =
+      Math.sin(dLat / 2) ** 2 +
+      Math.cos(toRad(lat1)) * Math.cos(toRad(lat2)) * Math.sin(dLon / 2) ** 2;
+    return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+  }
+
+  function formatDistance(m) {
+    if (m < 1000) return `${Math.round(m)} m`;
+    return `${(m / 1000).toFixed(m < 10000 ? 2 : 1)} km`;
+  }
+
+  function formatEta(minutes) {
+    if (!Number.isFinite(minutes) || minutes <= 0) return '—';
+    if (minutes < 1) return '<1 min';
+    if (minutes < 60) return `${Math.round(minutes)} min`;
+    const h = Math.floor(minutes / 60);
+    const m = Math.round(minutes % 60);
+    return `${h}h ${m}m`;
+  }
+
+  function debounce(fn, ms) {
+    let t;
+    return (...args) => {
+      clearTimeout(t);
+      t = setTimeout(() => fn(...args), ms);
+    };
+  }
+
+  function setError(msg) {
+    if (!msg) {
+      setupError.classList.add('hidden');
+      setupError.textContent = '';
+      return;
+    }
+    setupError.textContent = msg;
+    setupError.classList.remove('hidden');
+  }
+
+  function setStatus(mode, text) {
+    gpsStatus.className = 'status-pill';
+    if (mode === 'tracking') gpsStatus.classList.add('status-tracking');
+    if (mode === 'armed') gpsStatus.classList.add('status-armed');
+    if (mode === 'idle') gpsStatus.classList.add('status-idle');
+    gpsStatusText.textContent = text;
+  }
+
+  // ---------- Geocoding (Nominatim / OpenStreetMap — free, no key) ----------
+  async function geocode(query) {
+    if (!query || query.trim().length < 2) return [];
+    const url = `https://nominatim.openstreetmap.org/search?format=jsonv2&limit=5&q=${encodeURIComponent(query)}`;
+    const res = await fetch(url, { headers: { Accept: 'application/json' } });
+    if (!res.ok) throw new Error('Geocoding failed');
+    return res.json();
+  }
+
+  async function reverseGeocode(lat, lon) {
+    const url = `https://nominatim.openstreetmap.org/reverse?format=jsonv2&lat=${lat}&lon=${lon}`;
+    const res = await fetch(url, { headers: { Accept: 'application/json' } });
+    if (!res.ok) throw new Error('Reverse geocoding failed');
+    return res.json();
+  }
+
+  function shortLabel(displayName) {
+    const parts = displayName.split(',').map((p) => p.trim());
+    return parts.slice(0, 3).join(', ');
+  }
+
+  function wireAutocomplete(input, listEl, onPick) {
+    const run = debounce(async () => {
+      const q = input.value;
+      if (q.trim().length < 3) {
+        listEl.classList.add('hidden');
+        listEl.innerHTML = '';
+        return;
+      }
+      try {
+        const results = await geocode(q);
+        if (!results.length) {
+          listEl.classList.add('hidden');
+          return;
+        }
+        listEl.innerHTML = results
+          .map(
+            (r, i) =>
+              `<li data-i="${i}">${shortLabel(r.display_name)}</li>`
+          )
+          .join('');
+        listEl.classList.remove('hidden');
+        [...listEl.children].forEach((li, i) => {
+          li.addEventListener('click', () => {
+            const r = results[i];
+            input.value = shortLabel(r.display_name);
+            listEl.classList.add('hidden');
+            onPick({ lat: parseFloat(r.lat), lon: parseFloat(r.lon), label: shortLabel(r.display_name) });
+          });
+        });
+      } catch (e) {
+        listEl.classList.add('hidden');
+      }
+    }, 450);
+
+    input.addEventListener('input', run);
+    input.addEventListener('focus', () => {
+      if (listEl.children.length) listEl.classList.remove('hidden');
+    });
+    document.addEventListener('click', (e) => {
+      if (!listEl.contains(e.target) && e.target !== input) listEl.classList.add('hidden');
+    });
+  }
+
+  wireAutocomplete(originInput, originSuggestions, (loc) => {
+    state.origin = loc;
+  });
+  wireAutocomplete(destInput, destSuggestions, (loc) => {
+    state.destination = loc;
+  });
+
+  originInput.addEventListener('input', () => { state.origin = null; });
+  destInput.addEventListener('input', () => { state.destination = null; });
+
+  // ---------- "Use my location" for origin ----------
+  useMyLocationBtn.addEventListener('click', () => {
+    if (!navigator.geolocation) {
+      setError('Geolocation is not supported on this device/browser.');
+      return;
+    }
+    useMyLocationBtn.disabled = true;
+    navigator.geolocation.getCurrentPosition(
+      async (pos) => {
+        const { latitude, longitude } = pos.coords;
+        state.origin = { lat: latitude, lon: longitude, label: 'My current location' };
+        originInput.value = 'My current location';
+        useMyLocationBtn.disabled = false;
+        try {
+          const rev = await reverseGeocode(latitude, longitude);
+          if (rev && rev.display_name) {
+            const label = shortLabel(rev.display_name);
+            originInput.value = label;
+            state.origin.label = label;
+          }
+        } catch (_) { /* keep generic label */ }
+      },
+      (err) => {
+        useMyLocationBtn.disabled = false;
+        setError('Could not get your location: ' + describeGeoError(err));
+      },
+      { enableHighAccuracy: true, timeout: 10000 }
+    );
+  });
+
+  function describeGeoError(err) {
+    switch (err.code) {
+      case err.PERMISSION_DENIED: return 'permission denied. Allow location access and try again.';
+      case err.POSITION_UNAVAILABLE: return 'position unavailable.';
+      case err.TIMEOUT: return 'timed out getting a fix.';
+      default: return err.message || 'unknown error.';
+    }
+  }
+
+  // ---------- Radius slider ----------
+  radiusSlider.addEventListener('input', () => {
+    state.radius = parseInt(radiusSlider.value, 10);
+    radiusValue.textContent = `${state.radius} m`;
+  });
+
+  // ---------- Route preview ----------
+  async function ensureResolved(input, current) {
+    if (current) return current;
+    const results = await geocode(input.value);
+    if (!results.length) return null;
+    const r = results[0];
+    return { lat: parseFloat(r.lat), lon: parseFloat(r.lon), label: shortLabel(r.display_name) };
+  }
+
+  routeBtn.addEventListener('click', async () => {
+    setError(null);
+    if (!originInput.value.trim() || !destInput.value.trim()) {
+      setError('Enter both a starting point and a destination.');
+      return;
+    }
+    routeBtn.disabled = true;
+    routeBtn.textContent = 'Locating…';
+    try {
+      const [origin, destination] = await Promise.all([
+        ensureResolved(originInput, state.origin),
+        ensureResolved(destInput, state.destination),
+      ]);
+      if (!origin) throw new Error('Could not find that starting point.');
+      if (!destination) throw new Error('Could not find that destination.');
+      state.origin = origin;
+      state.destination = destination;
+
+      placeMarkers();
+      routeBtn.textContent = 'Drawing route…';
+      await drawRoute();
+      trackBtn.disabled = false;
+      routeBtn.textContent = 'Preview route';
+    } catch (e) {
+      setError(e.message || 'Something went wrong finding that route.');
+      routeBtn.textContent = 'Preview route';
+    } finally {
+      routeBtn.disabled = false;
+    }
+  });
+
+  function placeMarkers() {
+    const { origin, destination } = state;
+    if (userMarker) map.removeLayer(userMarker);
+    if (destMarker) map.removeLayer(destMarker);
+
+    userMarker = L.marker([origin.lat, origin.lon], { icon: userArrowIcon(0) }).addTo(map);
+    destMarker = L.marker([destination.lat, destination.lon], { icon: destPinIcon }).addTo(map);
+
+    map.fitBounds(
+      L.latLngBounds([origin.lat, origin.lon], [destination.lat, destination.lon]),
+      { padding: [28, 28] }
+    );
+  }
+
+  async function drawRoute() {
+    const { origin, destination } = state;
+    if (routeLine) { map.removeLayer(routeLine); routeLine = null; }
+
+    try {
+      const url = `https://router.project-osrm.org/route/v1/driving/${origin.lon},${origin.lat};${destination.lon},${destination.lat}?overview=full&geometries=geojson`;
+      const res = await fetch(url);
+      const data = await res.json();
+      if (data.code === 'Ok' && data.routes && data.routes[0]) {
+        const coords = data.routes[0].geometry.coordinates.map(([lon, lat]) => [lat, lon]);
+        routeLine = L.polyline(coords, { color: '#2dd4bf', weight: 4, opacity: 0.85 }).addTo(map);
+        const meters = data.routes[0].distance;
+        const mins = data.routes[0].duration / 60;
+        distanceValue.textContent = formatDistance(meters);
+        etaValue.textContent = formatEta(mins);
+        state.initialDistance = meters;
+      } else {
+        throw new Error('no route');
+      }
+    } catch (_) {
+      // Fall back to a straight line if the free routing server is unreachable/rate-limited
+      const straight = [[origin.lat, origin.lon], [destination.lat, destination.lon]];
+      routeLine = L.polyline(straight, { color: '#2dd4bf', weight: 3, opacity: 0.7, dashArray: '6 8' }).addTo(map);
+      const meters = haversineMeters(origin.lat, origin.lon, destination.lat, destination.lon);
+      distanceValue.textContent = formatDistance(meters);
+      etaValue.textContent = '—';
+      state.initialDistance = meters;
+    }
+  }
+
+  // ---------- Live tracking ----------
+  trackBtn.addEventListener('click', () => {
+    if (state.tracking) stopTracking();
+    else startTracking();
+  });
+
+  function startTracking() {
+    if (!navigator.geolocation) {
+      setError('Geolocation is not supported on this device/browser.');
+      return;
+    }
+    if (!state.destination) {
+      setError('Preview a route first.');
+      return;
+    }
+    setError(null);
+    state.tracking = true;
+    state.arrived = false;
+    state.lastFix = null;
+    state.displaySpeed = 0;
+    trackBtn.textContent = 'Stop tracking';
+    trackBtn.classList.add('is-danger');
+    mapPulse.classList.add('is-tracking');
+    setStatus('tracking', 'Tracking live');
+
+    state.watchId = navigator.geolocation.watchPosition(onPosition, onPositionError, {
+      enableHighAccuracy: true,
+      maximumAge: 1000,
+      timeout: 20000,
+    });
+  }
+
+  function stopTracking() {
+    if (state.watchId !== null) navigator.geolocation.clearWatch(state.watchId);
+    state.watchId = null;
+    state.tracking = false;
+    trackBtn.textContent = 'Start tracking';
+    trackBtn.classList.remove('is-danger');
+    mapPulse.classList.remove('is-tracking');
+    mapPulse.classList.remove('is-armed');
+    setStatus('idle', 'Location off');
+  }
+
+  function onPositionError(err) {
+    setError('GPS error: ' + describeGeoError(err));
+    setStatus('idle', 'Signal lost');
+  }
+
+  function onPosition(pos) {
+    const { latitude, longitude, speed, heading } = pos.coords;
+    const now = pos.timestamp || Date.now();
+
+    // --- speed: prefer the device's own GPS-derived speed, else compute it ---
+    let kmh = null;
+    if (typeof speed === 'number' && speed !== null && !Number.isNaN(speed) && speed >= 0) {
+      kmh = speed * 3.6;
+    } else if (state.lastFix) {
+      const distM = haversineMeters(state.lastFix.lat, state.lastFix.lon, latitude, longitude);
+      const dtS = (now - state.lastFix.t) / 1000;
+      if (dtS > 0.5) kmh = (distM / dtS) * 3.6;
+    }
+    if (kmh === null || !Number.isFinite(kmh)) kmh = state.displaySpeed;
+    kmh = Math.max(0, kmh);
+    // smooth out GPS jitter
+    state.displaySpeed = state.displaySpeed * 0.65 + kmh * 0.35;
+    if (state.displaySpeed < 0.6) state.displaySpeed = 0;
+
+    state.lastFix = { lat: latitude, lon: longitude, t: now };
+
+    speedValue.textContent = state.displaySpeed.toFixed(state.displaySpeed < 10 ? 1 : 0);
+
+    // --- marker + map ---
+    const headingDeg = typeof heading === 'number' && !Number.isNaN(heading) ? heading : null;
+    if (userMarker) {
+      userMarker.setLatLng([latitude, longitude]);
+      userMarker.setIcon(userArrowIcon(headingDeg ?? 0));
+    } else {
+      userMarker = L.marker([latitude, longitude], { icon: userArrowIcon(0) }).addTo(map);
+    }
+    map.setView([latitude, longitude], 17, { animate: true });
+
+    // --- distance / eta / progress ---
+    const dest = state.destination;
+    const remaining = haversineMeters(latitude, longitude, dest.lat, dest.lon);
+    distanceValue.textContent = formatDistance(remaining);
+
+    if (state.displaySpeed > 1) {
+      etaValue.textContent = formatEta((remaining / 1000 / state.displaySpeed) * 60);
+    }
+
+    if (state.initialDistance === null || remaining > state.initialDistance) {
+      state.initialDistance = remaining;
+    }
+    const pct = state.initialDistance > 0
+      ? Math.min(100, Math.max(0, 100 - (remaining / state.initialDistance) * 100))
+      : 100;
+    progressFill.style.width = `${pct}%`;
+    progressPct.textContent = `${Math.round(pct)}%`;
+
+    if (!state.arrived && remaining <= state.radius) {
+      triggerArrival(remaining);
+    }
+  }
+
+  // ---------- Alarm ----------
+  function triggerArrival(remainingM) {
+    state.arrived = true;
+    setStatus('armed', 'Arrived');
+    mapPulse.classList.remove('is-tracking');
+    mapPulse.classList.add('is-armed');
+    arrivalSub.textContent = `You're ${Math.round(remainingM)} m from your destination.`;
+    arrivalModal.classList.remove('hidden');
+    startAlarmSound();
+    startVibration();
+  }
+
+  function startAlarmSound() {
+    if (!audioCtx) {
+      const AC = window.AudioContext || window.webkitAudioContext;
+      audioCtx = new AC();
+    }
+    if (audioCtx.state === 'suspended') audioCtx.resume();
+    playBeep();
+    alarmInterval = setInterval(playBeep, 650);
+  }
+
+  function playBeep() {
+    if (!audioCtx) return;
+    const t0 = audioCtx.currentTime;
+    [880, 1108].forEach((freq, i) => {
+      const osc = audioCtx.createOscillator();
+      const gain = audioCtx.createGain();
+      osc.type = 'sine';
+      osc.frequency.setValueAtTime(freq, t0 + i * 0.16);
+      gain.gain.setValueAtTime(0.0001, t0 + i * 0.16);
+      gain.gain.exponentialRampToValueAtTime(0.35, t0 + i * 0.16 + 0.02);
+      gain.gain.exponentialRampToValueAtTime(0.0001, t0 + i * 0.16 + 0.28);
+      osc.connect(gain).connect(audioCtx.destination);
+      osc.start(t0 + i * 0.16);
+      osc.stop(t0 + i * 0.16 + 0.3);
+    });
+  }
+
+  function startVibration() {
+    if (!navigator.vibrate) return;
+    navigator.vibrate([250, 120, 250]);
+    vibrateInterval = setInterval(() => navigator.vibrate([250, 120, 250]), 650);
+  }
+
+  function stopAlarm() {
+    clearInterval(alarmInterval);
+    clearInterval(vibrateInterval);
+    if (navigator.vibrate) navigator.vibrate(0);
+    arrivalModal.classList.add('hidden');
+    mapPulse.classList.remove('is-armed');
+    setStatus('idle', 'Arrived — alarm stopped');
+    stopTracking();
+  }
+
+  stopAlarmBtn.addEventListener('click', stopAlarm);
+
+  // Unlock audio context on first user gesture (mobile browsers require this)
+  document.addEventListener('click', () => {
+    if (audioCtx && audioCtx.state === 'suspended') audioCtx.resume();
+  }, { once: true });
+})();
