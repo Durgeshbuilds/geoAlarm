@@ -64,9 +64,19 @@
     inertia: true,
   }).setView([20, 0], 2);
 
-  // CARTO Voyager — free, no key, closer to a "real maps app" look than plain OSM tiles.
+  // CARTO Voyager — free, no card required, but CARTO now requires a free API key
+  // on their raster basemaps (policy change, Aug 2026). Get one in ~1 minute, no
+  // account needed, at https://carto.com/basemaps/apikey — it's emailed instantly.
+  // Paste it below. It's fine for this to live in client-side code: it's not a
+  // secret, it's just a usage-tracking token CARTO reads from the tile request.
+  const CARTO_API_KEY = 'PASTE_YOUR_FREE_CARTO_KEY_HERE';
+
   const dpr = window.devicePixelRatio > 1 ? '@2x' : '';
-  L.tileLayer(`https://{s}.basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}${dpr}.png`, {
+  const cartoUrl = CARTO_API_KEY && CARTO_API_KEY !== 'PASTE_YOUR_FREE_CARTO_KEY_HERE'
+    ? `https://{s}.basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}${dpr}.png?key=${CARTO_API_KEY}`
+    : `https://{s}.basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}${dpr}.png`;
+
+  L.tileLayer(cartoUrl, {
     maxZoom: 20,
     subdomains: 'abcd',
   }).addTo(map);

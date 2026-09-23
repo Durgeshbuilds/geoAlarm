@@ -380,24 +380,26 @@ body {
 .c-tick {
   position: absolute;
   font-size: 9px;
-  font-weight: 600;
+  font-weight: 700;
   color: var(--text-muted);
   font-family: 'Space Grotesk', sans-serif;
+  z-index: 2;
 }
-.c-n { top: 4px; left: 50%; transform: translateX(-50%); color: #f5a623; }
-.c-e { right: 5px; top: 50%; transform: translateY(-50%); }
-.c-s { bottom: 4px; left: 50%; transform: translateX(-50%); }
-.c-w { left: 5px; top: 50%; transform: translateY(-50%); }
+.c-n { top: 5px; left: 50%; transform: translateX(-50%); color: #f5a623; }
+.c-e { right: 6px; top: 50%; transform: translateY(-50%); }
+.c-s { bottom: 5px; left: 50%; transform: translateX(-50%); }
+.c-w { left: 6px; top: 50%; transform: translateY(-50%); }
 .compass-needle {
   position: absolute;
   left: 50%; top: 50%;
-  width: 2px; height: 20px;
-  margin-left: -1px; margin-top: -20px;
+  width: 2px; height: 14px;
+  margin-left: -1px; margin-top: -15px;
   background: linear-gradient(to top, rgba(245,166,35,0.15), #f5a623);
   border-radius: 2px;
   transform-origin: 50% 100%;
   transform: rotate(0deg);
   transition: transform 0.15s ease-out;
+  z-index: 1;
 }
 
 /* ---------- Autocomplete status rows ---------- */
