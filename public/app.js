@@ -415,7 +415,7 @@
     trackBtn.classList.remove('is-danger');
     mapPulse.classList.remove('is-tracking', 'is-armed');
     recenterBtn.classList.remove('is-following');
-    setStatus('idle', 'Location off');
+    setStatus('idle', 'Not tracking');
     releaseWakeLock();
   }
 
@@ -618,5 +618,22 @@
   window.addEventListener('orientationchange', () => setTimeout(() => map.invalidateSize(), 250));
 
   // ---------- Init ----------
+    // Show upfront if the browser has blocked location access
+  if (navigator.permissions && navigator.permissions.query) {
+    navigator.permissions.query({ name: 'geolocation' }).then((p) => {
+      const show = () => {
+        if (state.tracking) return;
+        if (p.state === 'denied') {
+          setStatus('blocked', 'Location blocked');
+          setError('Location is blocked for this site. Allow it in your browser settings to use tracking.');
+        } else {
+          setStatus('idle', 'Not tracking');
+          setError(null);
+        }
+      };
+      show();
+      p.onchange = show;
+    }).catch(() => {});
+  }
   restoreTripState();
 })();
