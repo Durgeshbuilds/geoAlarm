@@ -23,45 +23,74 @@
   const arrivalModal = document.getElementById('arrivalModal');
   const arrivalSub = document.getElementById('arrivalSub');
   const stopAlarmBtn = document.getElementById('stopAlarmBtn');
+  const recenterBtn = document.getElementById('recenterBtn');
+  const compassNeedle = document.getElementById('compassNeedle');
+  const enableCompassBtn = document.getElementById('enableCompassBtn');
+  const headingReadout = document.getElementById('headingReadout');
 
   // ---------- State ----------
+  const STORAGE_KEY = 'geoalarm_v1';
+
   const state = {
-    origin: null,        // { lat, lon, label }
-    destination: null,   // { lat, lon, label }
-    radius: 100,          // metres
+    origin: null,
+    destination: null,
+    radius: 100,
     tracking: false,
     arrived: false,
     watchId: null,
-    lastFix: null,        // { lat, lon, t }
+    lastFix: null,       // { lat, lon, t }
     displaySpeed: 0,
     initialDistance: null,
+    deviceHeading: null,
+    followMode: true,
   };
 
   let audioCtx = null;
   let alarmInterval = null;
   let vibrateInterval = null;
+  let wakeLock = null;
 
   // ---------- Map setup ----------
   const map = L.map('map', {
     zoomControl: false,
     attributionControl: false,
-    dragging: false,
-    scrollWheelZoom: false,
-    doubleClickZoom: false,
-    touchZoom: false,
+    dragging: true,
+    scrollWheelZoom: true,
+    doubleClickZoom: true,
+    touchZoom: true,
     boxZoom: false,
     keyboard: false,
-    fadeAnimation: true,
+    tap: true,
+    inertia: true,
   }).setView([20, 0], 2);
 
-  L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
-    maxZoom: 19,
-    subdomains: 'abc',
+  // CARTO Voyager — free, no key, closer to a "real maps app" look than plain OSM tiles.
+  const dpr = window.devicePixelRatio > 1 ? '@2x' : '';
+  L.tileLayer(`https://{s}.basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}${dpr}.png`, {
+    maxZoom: 20,
+    subdomains: 'abcd',
   }).addTo(map);
+
+  // Manual "follow me" tracking: once the user drags/zooms, stop force-recentering
+  // until they tap the recenter button (same behaviour as Google Maps' blue-dot button).
+  map.on('dragstart zoomstart', () => {
+    if (state.tracking) {
+      state.followMode = false;
+      recenterBtn.classList.remove('is-following');
+    }
+  });
+
+  recenterBtn.addEventListener('click', () => {
+    state.followMode = true;
+    recenterBtn.classList.add('is-following');
+    if (state.lastFix) map.setView([state.lastFix.lat, state.lastFix.lon], map.getZoom() < 14 ? 17 : map.getZoom(), { animate: true });
+  });
 
   let userMarker = null;
   let destMarker = null;
-  let routeLine = null;
+  let routeLine = null;      // planned route (teal)
+  let traveledLine = null;   // actual breadcrumb trail (amber)
+  let traveledLatLngs = [];
 
   function userArrowIcon(headingDeg) {
     const rot = Number.isFinite(headingDeg) ? headingDeg : 0;
@@ -118,6 +147,11 @@
     return `${h}h ${m}m`;
   }
 
+  function degToCompass(deg) {
+    const dirs = ['N', 'NE', 'E', 'SE', 'S', 'SW', 'W', 'NW'];
+    return dirs[Math.round(((deg % 360) + 360) % 360 / 45) % 8];
+  }
+
   function debounce(fn, ms) {
     let t;
     return (...args) => {
@@ -145,12 +179,35 @@
   }
 
   // ---------- Geocoding (Nominatim / OpenStreetMap — free, no key) ----------
+  const geocodeCache = new Map();
+
   async function geocode(query) {
-    if (!query || query.trim().length < 2) return [];
-    const url = `https://nominatim.openstreetmap.org/search?format=jsonv2&limit=5&q=${encodeURIComponent(query)}`;
-    const res = await fetch(url, { headers: { Accept: 'application/json' } });
-    if (!res.ok) throw new Error('Geocoding failed');
-    return res.json();
+    const key = query.trim().toLowerCase();
+    if (geocodeCache.has(key)) return geocodeCache.get(key);
+
+    const params = new URLSearchParams({
+      format: 'jsonv2',
+      limit: '8',
+      addressdetails: '1',
+      q: query,
+    });
+    // Bias (not restrict) results toward the user's last known position, so common
+    // local place names actually surface instead of unrelated results worldwide.
+    if (state.lastFix) {
+      const { lat, lon } = state.lastFix;
+      const d = 1.5;
+      params.set('viewbox', `${lon - d},${lat + d},${lon + d},${lat - d}`);
+    }
+
+    const res = await fetch(`https://nominatim.openstreetmap.org/search?${params}`, {
+      headers: { Accept: 'application/json' },
+    });
+    if (!res.ok) {
+      throw new Error(res.status === 429 ? 'rate-limited' : 'geocode-failed');
+    }
+    const data = await res.json();
+    geocodeCache.set(key, data);
+    return data;
   }
 
   async function reverseGeocode(lat, lon) {
@@ -165,6 +222,11 @@
     return parts.slice(0, 3).join(', ');
   }
 
+  function renderMessage(listEl, text) {
+    listEl.innerHTML = `<li class="muted">${text}</li>`;
+    listEl.classList.remove('hidden');
+  }
+
   function wireAutocomplete(input, listEl, onPick) {
     const run = debounce(async () => {
       const q = input.value;
@@ -173,17 +235,15 @@
         listEl.innerHTML = '';
         return;
       }
+      renderMessage(listEl, 'Searching…');
       try {
         const results = await geocode(q);
         if (!results.length) {
-          listEl.classList.add('hidden');
+          renderMessage(listEl, 'No matches — try a different spelling or add a city.');
           return;
         }
         listEl.innerHTML = results
-          .map(
-            (r, i) =>
-              `<li data-i="${i}">${shortLabel(r.display_name)}</li>`
-          )
+          .map((r, i) => `<li data-i="${i}">${shortLabel(r.display_name)}</li>`)
           .join('');
         listEl.classList.remove('hidden');
         [...listEl.children].forEach((li, i) => {
@@ -195,9 +255,14 @@
           });
         });
       } catch (e) {
-        listEl.classList.add('hidden');
+        renderMessage(
+          listEl,
+          e.message === 'rate-limited'
+            ? 'Search is briefly rate-limited — wait a few seconds and keep typing.'
+            : 'Search unavailable right now — check your connection.'
+        );
       }
-    }, 450);
+    }, 500);
 
     input.addEventListener('input', run);
     input.addEventListener('focus', () => {
@@ -208,12 +273,8 @@
     });
   }
 
-  wireAutocomplete(originInput, originSuggestions, (loc) => {
-    state.origin = loc;
-  });
-  wireAutocomplete(destInput, destSuggestions, (loc) => {
-    state.destination = loc;
-  });
+  wireAutocomplete(originInput, originSuggestions, (loc) => { state.origin = loc; });
+  wireAutocomplete(destInput, destSuggestions, (loc) => { state.destination = loc; });
 
   originInput.addEventListener('input', () => { state.origin = null; });
   destInput.addEventListener('input', () => { state.destination = null; });
@@ -261,6 +322,7 @@
   radiusSlider.addEventListener('input', () => {
     state.radius = parseInt(radiusSlider.value, 10);
     radiusValue.textContent = `${state.radius} m`;
+    saveTripState();
   });
 
   // ---------- Route preview ----------
@@ -295,6 +357,7 @@
       await drawRoute();
       trackBtn.disabled = false;
       routeBtn.textContent = 'Preview route';
+      saveTripState();
     } catch (e) {
       setError(e.message || 'Something went wrong finding that route.');
       routeBtn.textContent = 'Preview route';
@@ -337,7 +400,6 @@
         throw new Error('no route');
       }
     } catch (_) {
-      // Fall back to a straight line if the free routing server is unreachable/rate-limited
       const straight = [[origin.lat, origin.lon], [destination.lat, destination.lon]];
       routeLine = L.polyline(straight, { color: '#2dd4bf', weight: 3, opacity: 0.7, dashArray: '6 8' }).addTo(map);
       const meters = haversineMeters(origin.lat, origin.lon, destination.lat, destination.lon);
@@ -345,6 +407,41 @@
       etaValue.textContent = '—';
       state.initialDistance = meters;
     }
+  }
+
+  // ---------- Persistence (so a reload/crash doesn't lose your trip) ----------
+  function saveTripState() {
+    try {
+      localStorage.setItem(STORAGE_KEY, JSON.stringify({
+        origin: state.origin,
+        destination: state.destination,
+        radius: state.radius,
+      }));
+    } catch (_) { /* ignore */ }
+  }
+
+  function loadTripState() {
+    try {
+      const raw = localStorage.getItem(STORAGE_KEY);
+      return raw ? JSON.parse(raw) : null;
+    } catch (_) { return null; }
+  }
+
+  async function restoreTripState() {
+    const saved = loadTripState();
+    if (!saved || !saved.origin || !saved.destination) return;
+    state.origin = saved.origin;
+    state.destination = saved.destination;
+    originInput.value = saved.origin.label || '';
+    destInput.value = saved.destination.label || '';
+    if (saved.radius) {
+      state.radius = saved.radius;
+      radiusSlider.value = saved.radius;
+      radiusValue.textContent = `${saved.radius} m`;
+    }
+    placeMarkers();
+    await drawRoute();
+    trackBtn.disabled = false;
   }
 
   // ---------- Live tracking ----------
@@ -367,10 +464,16 @@
     state.arrived = false;
     state.lastFix = null;
     state.displaySpeed = 0;
+    state.followMode = true;
+    traveledLatLngs = [];
+    if (traveledLine) { map.removeLayer(traveledLine); traveledLine = null; }
+
     trackBtn.textContent = 'Stop tracking';
     trackBtn.classList.add('is-danger');
     mapPulse.classList.add('is-tracking');
+    recenterBtn.classList.add('is-following');
     setStatus('tracking', 'Tracking live');
+    acquireWakeLock();
 
     state.watchId = navigator.geolocation.watchPosition(onPosition, onPositionError, {
       enableHighAccuracy: true,
@@ -387,7 +490,9 @@
     trackBtn.classList.remove('is-danger');
     mapPulse.classList.remove('is-tracking');
     mapPulse.classList.remove('is-armed');
+    recenterBtn.classList.remove('is-following');
     setStatus('idle', 'Location off');
+    releaseWakeLock();
   }
 
   function onPositionError(err) {
@@ -410,23 +515,40 @@
     }
     if (kmh === null || !Number.isFinite(kmh)) kmh = state.displaySpeed;
     kmh = Math.max(0, kmh);
-    // smooth out GPS jitter
     state.displaySpeed = state.displaySpeed * 0.65 + kmh * 0.35;
     if (state.displaySpeed < 0.6) state.displaySpeed = 0;
 
     state.lastFix = { lat: latitude, lon: longitude, t: now };
-
     speedValue.textContent = state.displaySpeed.toFixed(state.displaySpeed < 10 ? 1 : 0);
 
-    // --- marker + map ---
-    const headingDeg = typeof heading === 'number' && !Number.isNaN(heading) ? heading : null;
+    // --- heading: real GPS heading while moving, else fall back to the phone's compass ---
+    let headingDeg = null;
+    if (typeof heading === 'number' && !Number.isNaN(heading) && state.displaySpeed > 0.8) {
+      headingDeg = heading;
+    } else if (state.deviceHeading !== null) {
+      headingDeg = state.deviceHeading;
+    }
+
+    // --- marker + breadcrumb trail ---
     if (userMarker) {
       userMarker.setLatLng([latitude, longitude]);
       userMarker.setIcon(userArrowIcon(headingDeg ?? 0));
     } else {
       userMarker = L.marker([latitude, longitude], { icon: userArrowIcon(0) }).addTo(map);
     }
-    map.setView([latitude, longitude], 17, { animate: true });
+
+    traveledLatLngs.push([latitude, longitude]);
+    if (traveledLatLngs.length > 1) {
+      if (traveledLine) {
+        traveledLine.setLatLngs(traveledLatLngs);
+      } else {
+        traveledLine = L.polyline(traveledLatLngs, { color: '#f5a623', weight: 4, opacity: 0.95, className: 'trail-glow' }).addTo(map);
+      }
+    }
+
+    if (state.followMode) {
+      map.setView([latitude, longitude], map.getZoom() < 14 ? 17 : map.getZoom(), { animate: true });
+    }
 
     // --- distance / eta / progress ---
     const dest = state.destination;
@@ -450,6 +572,38 @@
       triggerArrival(remaining);
     }
   }
+
+  // ---------- Compass (device orientation) ----------
+  function handleOrientation(e) {
+    let heading = null;
+    if (typeof e.webkitCompassHeading === 'number') {
+      heading = e.webkitCompassHeading; // iOS Safari: already 0 = north, clockwise
+    } else if (typeof e.alpha === 'number') {
+      heading = (360 - e.alpha) % 360; // best-effort for Android's absolute orientation
+    }
+    if (heading === null || Number.isNaN(heading)) return;
+    state.deviceHeading = heading;
+    compassNeedle.style.transform = `rotate(${-heading}deg)`;
+    headingReadout.textContent = `Heading ${Math.round(heading)}° ${degToCompass(heading)}`;
+  }
+
+  enableCompassBtn.addEventListener('click', async () => {
+    try {
+      if (typeof DeviceOrientationEvent !== 'undefined' && typeof DeviceOrientationEvent.requestPermission === 'function') {
+        const result = await DeviceOrientationEvent.requestPermission();
+        if (result !== 'granted') {
+          setError('Compass permission was not granted.');
+          return;
+        }
+      }
+      window.addEventListener('deviceorientationabsolute', handleOrientation, true);
+      window.addEventListener('deviceorientation', handleOrientation, true);
+      enableCompassBtn.textContent = 'Compass on';
+      enableCompassBtn.disabled = true;
+    } catch (_) {
+      setError('This device/browser does not support a live compass.');
+    }
+  });
 
   // ---------- Alarm ----------
   function triggerArrival(remainingM) {
@@ -512,4 +666,36 @@
   document.addEventListener('click', () => {
     if (audioCtx && audioCtx.state === 'suspended') audioCtx.resume();
   }, { once: true });
+
+  // ---------- Screen Wake Lock (keep the screen/tab alive while tracking) ----------
+  async function acquireWakeLock() {
+    try {
+      if ('wakeLock' in navigator) {
+        wakeLock = await navigator.wakeLock.request('screen');
+        wakeLock.addEventListener('release', () => { wakeLock = null; });
+      }
+    } catch (_) { /* not critical — some browsers/contexts refuse this, that's fine */ }
+  }
+
+  function releaseWakeLock() {
+    if (wakeLock) {
+      wakeLock.release().catch(() => {});
+      wakeLock = null;
+    }
+  }
+
+  // ---------- Recover from a backgrounded/discarded tab ----------
+  // Leaflet maps render blank after being hidden unless told to recalculate their size,
+  // and re-acquiring the wake lock after the OS silently drops it on background/lock.
+  document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState === 'visible') {
+      map.invalidateSize();
+      if (state.tracking && !wakeLock) acquireWakeLock();
+    }
+  });
+  window.addEventListener('pageshow', () => map.invalidateSize());
+  window.addEventListener('orientationchange', () => setTimeout(() => map.invalidateSize(), 250));
+
+  // ---------- Init ----------
+  restoreTripState();
 })();
