@@ -157,7 +157,10 @@
         </div>
 
         <div class="flex items-center justify-between w-full mt-4 gap-3">
-          <button id="enableCompassBtn" class="btn-secondary !py-2 !px-3 text-xs">Enable compass</button>
+          <button id="enableCompassBtn" class="compass-toggle" aria-pressed="false" title="Turn the live compass on or off">
+            <span class="toggle-dot"></span>
+            <span id="compassBtnLabel">Compass: Off</span>
+          </button>
           <span id="headingReadout" class="text-xs text-slate-500">Heading —</span>
         </div>
 

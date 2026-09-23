@@ -25,7 +25,9 @@
   const stopAlarmBtn = document.getElementById('stopAlarmBtn');
   const recenterBtn = document.getElementById('recenterBtn');
   const compassNeedle = document.getElementById('compassNeedle');
+  const compassBadge = document.getElementById('compassBadge');
   const enableCompassBtn = document.getElementById('enableCompassBtn');
+  const compassBtnLabel = document.getElementById('compassBtnLabel');
   const headingReadout = document.getElementById('headingReadout');
 
   // ---------- State ----------
@@ -38,7 +40,7 @@
     tracking: false,
     arrived: false,
     watchId: null,
-    lastFix: null,       // { lat, lon, t }
+    lastFix: null,        // { lat, lon, t }
     displaySpeed: 0,
     initialDistance: null,
     deviceHeading: null,
@@ -64,25 +66,22 @@
     inertia: true,
   }).setView([20, 0], 2);
 
-  // CARTO Voyager — free, no card required, but CARTO now requires a free API key
-  // on their raster basemaps (policy change, Aug 2026). Get one in ~1 minute, no
-  // account needed, at https://carto.com/basemaps/apikey — it's emailed instantly.
-  // Paste it below. It's fine for this to live in client-side code: it's not a
-  // secret, it's just a usage-tracking token CARTO reads from the tile request.
+  // CARTO Voyager tiles. CARTO requires a free API key (no account or card needed):
+  // https://carto.com/basemaps/apikey — paste it below. Without a key, plain
+  // OpenStreetMap tiles are used instead, so there is no watermark either way.
   const CARTO_API_KEY = 'PASTE_YOUR_FREE_CARTO_KEY_HERE';
 
-  const dpr = window.devicePixelRatio > 1 ? '@2x' : '';
-  const cartoUrl = CARTO_API_KEY && CARTO_API_KEY !== 'PASTE_YOUR_FREE_CARTO_KEY_HERE'
-    ? `https://{s}.basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}${dpr}.png?key=${CARTO_API_KEY}`
-    : `https://{s}.basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}${dpr}.png`;
+  const hasCartoKey = CARTO_API_KEY && CARTO_API_KEY !== 'PASTE_YOUR_FREE_CARTO_KEY_HERE';
+  if (hasCartoKey) {
+    const dpr = window.devicePixelRatio > 1 ? '@2x' : '';
+    L.tileLayer(`https://{s}.basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}${dpr}.png?key=${CARTO_API_KEY}`, {
+      maxZoom: 20,
+      subdomains: 'abcd',
+    }).addTo(map);
+  } else {
+    L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', { maxZoom: 19 }).addTo(map);
+  }
 
-  L.tileLayer(cartoUrl, {
-    maxZoom: 20,
-    subdomains: 'abcd',
-  }).addTo(map);
-
-  // Manual "follow me" tracking: once the user drags/zooms, stop force-recentering
-  // until they tap the recenter button (same behaviour as Google Maps' blue-dot button).
   map.on('dragstart zoomstart', () => {
     if (state.tracking) {
       state.followMode = false;
@@ -98,8 +97,8 @@
 
   let userMarker = null;
   let destMarker = null;
-  let routeLine = null;      // planned route (teal)
-  let traveledLine = null;   // actual breadcrumb trail (amber)
+  let routeLine = null;
+  let traveledLine = null;
   let traveledLatLngs = [];
 
   function userArrowIcon(headingDeg) {
@@ -137,9 +136,7 @@
     const toRad = (d) => (d * Math.PI) / 180;
     const dLat = toRad(lat2 - lat1);
     const dLon = toRad(lon2 - lon1);
-    const a =
-      Math.sin(dLat / 2) ** 2 +
-      Math.cos(toRad(lat1)) * Math.cos(toRad(lat2)) * Math.sin(dLon / 2) ** 2;
+    const a = Math.sin(dLat / 2) ** 2 + Math.cos(toRad(lat1)) * Math.cos(toRad(lat2)) * Math.sin(dLon / 2) ** 2;
     return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
   }
 
@@ -159,25 +156,17 @@
 
   function degToCompass(deg) {
     const dirs = ['N', 'NE', 'E', 'SE', 'S', 'SW', 'W', 'NW'];
-    return dirs[Math.round(((deg % 360) + 360) % 360 / 45) % 8];
+    return dirs[Math.round((((deg % 360) + 360) % 360) / 45) % 8];
   }
 
   function debounce(fn, ms) {
     let t;
-    return (...args) => {
-      clearTimeout(t);
-      t = setTimeout(() => fn(...args), ms);
-    };
+    return (...args) => { clearTimeout(t); t = setTimeout(() => fn(...args), ms); };
   }
 
   function setError(msg) {
-    if (!msg) {
-      setupError.classList.add('hidden');
-      setupError.textContent = '';
-      return;
-    }
-    setupError.textContent = msg;
-    setupError.classList.remove('hidden');
+    setupError.textContent = msg || '';
+    setupError.classList.toggle('hidden', !msg);
   }
 
   function setStatus(mode, text) {
@@ -194,42 +183,27 @@
   async function geocode(query) {
     const key = query.trim().toLowerCase();
     if (geocodeCache.has(key)) return geocodeCache.get(key);
-
-    const params = new URLSearchParams({
-      format: 'jsonv2',
-      limit: '8',
-      addressdetails: '1',
-      q: query,
-    });
-    // Bias (not restrict) results toward the user's last known position, so common
-    // local place names actually surface instead of unrelated results worldwide.
+    const params = new URLSearchParams({ format: 'jsonv2', limit: '8', addressdetails: '1', q: query });
     if (state.lastFix) {
       const { lat, lon } = state.lastFix;
       const d = 1.5;
       params.set('viewbox', `${lon - d},${lat + d},${lon + d},${lat - d}`);
     }
-
-    const res = await fetch(`https://nominatim.openstreetmap.org/search?${params}`, {
-      headers: { Accept: 'application/json' },
-    });
-    if (!res.ok) {
-      throw new Error(res.status === 429 ? 'rate-limited' : 'geocode-failed');
-    }
+    const res = await fetch(`https://nominatim.openstreetmap.org/search?${params}`, { headers: { Accept: 'application/json' } });
+    if (!res.ok) throw new Error(res.status === 429 ? 'rate-limited' : 'geocode-failed');
     const data = await res.json();
     geocodeCache.set(key, data);
     return data;
   }
 
   async function reverseGeocode(lat, lon) {
-    const url = `https://nominatim.openstreetmap.org/reverse?format=jsonv2&lat=${lat}&lon=${lon}`;
-    const res = await fetch(url, { headers: { Accept: 'application/json' } });
+    const res = await fetch(`https://nominatim.openstreetmap.org/reverse?format=jsonv2&lat=${lat}&lon=${lon}`, { headers: { Accept: 'application/json' } });
     if (!res.ok) throw new Error('Reverse geocoding failed');
     return res.json();
   }
 
   function shortLabel(displayName) {
-    const parts = displayName.split(',').map((p) => p.trim());
-    return parts.slice(0, 3).join(', ');
+    return displayName.split(',').map((p) => p.trim()).slice(0, 3).join(', ');
   }
 
   function renderMessage(listEl, text) {
@@ -240,21 +214,12 @@
   function wireAutocomplete(input, listEl, onPick) {
     const run = debounce(async () => {
       const q = input.value;
-      if (q.trim().length < 3) {
-        listEl.classList.add('hidden');
-        listEl.innerHTML = '';
-        return;
-      }
+      if (q.trim().length < 3) { listEl.classList.add('hidden'); listEl.innerHTML = ''; return; }
       renderMessage(listEl, 'Searching…');
       try {
         const results = await geocode(q);
-        if (!results.length) {
-          renderMessage(listEl, 'No matches — try a different spelling or add a city.');
-          return;
-        }
-        listEl.innerHTML = results
-          .map((r, i) => `<li data-i="${i}">${shortLabel(r.display_name)}</li>`)
-          .join('');
+        if (!results.length) { renderMessage(listEl, 'No matches — try a different spelling or add a city.'); return; }
+        listEl.innerHTML = results.map((r, i) => `<li data-i="${i}">${shortLabel(r.display_name)}</li>`).join('');
         listEl.classList.remove('hidden');
         [...listEl.children].forEach((li, i) => {
           li.addEventListener('click', () => {
@@ -265,19 +230,14 @@
           });
         });
       } catch (e) {
-        renderMessage(
-          listEl,
-          e.message === 'rate-limited'
-            ? 'Search is briefly rate-limited — wait a few seconds and keep typing.'
-            : 'Search unavailable right now — check your connection.'
-        );
+        renderMessage(listEl, e.message === 'rate-limited'
+          ? 'Search is briefly rate-limited — wait a few seconds and keep typing.'
+          : 'Search unavailable right now — check your connection.');
       }
     }, 500);
 
     input.addEventListener('input', run);
-    input.addEventListener('focus', () => {
-      if (listEl.children.length) listEl.classList.remove('hidden');
-    });
+    input.addEventListener('focus', () => { if (listEl.children.length) listEl.classList.remove('hidden'); });
     document.addEventListener('click', (e) => {
       if (!listEl.contains(e.target) && e.target !== input) listEl.classList.add('hidden');
     });
@@ -285,16 +245,21 @@
 
   wireAutocomplete(originInput, originSuggestions, (loc) => { state.origin = loc; });
   wireAutocomplete(destInput, destSuggestions, (loc) => { state.destination = loc; });
-
   originInput.addEventListener('input', () => { state.origin = null; });
   destInput.addEventListener('input', () => { state.destination = null; });
 
-  // ---------- "Use my location" for origin ----------
-  useMyLocationBtn.addEventListener('click', () => {
-    if (!navigator.geolocation) {
-      setError('Geolocation is not supported on this device/browser.');
-      return;
+  // ---------- "Use my location" ----------
+  function describeGeoError(err) {
+    switch (err.code) {
+      case err.PERMISSION_DENIED: return 'permission denied. Allow location access and try again.';
+      case err.POSITION_UNAVAILABLE: return 'position unavailable.';
+      case err.TIMEOUT: return 'timed out getting a fix.';
+      default: return err.message || 'unknown error.';
     }
+  }
+
+  useMyLocationBtn.addEventListener('click', () => {
+    if (!navigator.geolocation) { setError('Geolocation is not supported on this device/browser.'); return; }
     useMyLocationBtn.disabled = true;
     navigator.geolocation.getCurrentPosition(
       async (pos) => {
@@ -311,22 +276,10 @@
           }
         } catch (_) { /* keep generic label */ }
       },
-      (err) => {
-        useMyLocationBtn.disabled = false;
-        setError('Could not get your location: ' + describeGeoError(err));
-      },
+      (err) => { useMyLocationBtn.disabled = false; setError('Could not get your location: ' + describeGeoError(err)); },
       { enableHighAccuracy: true, timeout: 10000 }
     );
   });
-
-  function describeGeoError(err) {
-    switch (err.code) {
-      case err.PERMISSION_DENIED: return 'permission denied. Allow location access and try again.';
-      case err.POSITION_UNAVAILABLE: return 'position unavailable.';
-      case err.TIMEOUT: return 'timed out getting a fix.';
-      default: return err.message || 'unknown error.';
-    }
-  }
 
   // ---------- Radius slider ----------
   radiusSlider.addEventListener('input', () => {
@@ -346,10 +299,7 @@
 
   routeBtn.addEventListener('click', async () => {
     setError(null);
-    if (!originInput.value.trim() || !destInput.value.trim()) {
-      setError('Enter both a starting point and a destination.');
-      return;
-    }
+    if (!originInput.value.trim() || !destInput.value.trim()) { setError('Enter both a starting point and a destination.'); return; }
     routeBtn.disabled = true;
     routeBtn.textContent = 'Locating…';
     try {
@@ -361,18 +311,16 @@
       if (!destination) throw new Error('Could not find that destination.');
       state.origin = origin;
       state.destination = destination;
-
       placeMarkers();
       routeBtn.textContent = 'Drawing route…';
       await drawRoute();
       trackBtn.disabled = false;
-      routeBtn.textContent = 'Preview route';
       saveTripState();
     } catch (e) {
       setError(e.message || 'Something went wrong finding that route.');
-      routeBtn.textContent = 'Preview route';
     } finally {
       routeBtn.disabled = false;
+      routeBtn.textContent = 'Preview route';
     }
   });
 
@@ -380,38 +328,26 @@
     const { origin, destination } = state;
     if (userMarker) map.removeLayer(userMarker);
     if (destMarker) map.removeLayer(destMarker);
-
     userMarker = L.marker([origin.lat, origin.lon], { icon: userArrowIcon(0) }).addTo(map);
     destMarker = L.marker([destination.lat, destination.lon], { icon: destPinIcon }).addTo(map);
-
-    map.fitBounds(
-      L.latLngBounds([origin.lat, origin.lon], [destination.lat, destination.lon]),
-      { padding: [28, 28] }
-    );
+    map.fitBounds(L.latLngBounds([origin.lat, origin.lon], [destination.lat, destination.lon]), { padding: [28, 28] });
   }
 
   async function drawRoute() {
     const { origin, destination } = state;
     if (routeLine) { map.removeLayer(routeLine); routeLine = null; }
-
     try {
       const url = `https://router.project-osrm.org/route/v1/driving/${origin.lon},${origin.lat};${destination.lon},${destination.lat}?overview=full&geometries=geojson`;
-      const res = await fetch(url);
-      const data = await res.json();
-      if (data.code === 'Ok' && data.routes && data.routes[0]) {
-        const coords = data.routes[0].geometry.coordinates.map(([lon, lat]) => [lat, lon]);
-        routeLine = L.polyline(coords, { color: '#2dd4bf', weight: 4, opacity: 0.85 }).addTo(map);
-        const meters = data.routes[0].distance;
-        const mins = data.routes[0].duration / 60;
-        distanceValue.textContent = formatDistance(meters);
-        etaValue.textContent = formatEta(mins);
-        state.initialDistance = meters;
-      } else {
-        throw new Error('no route');
-      }
+      const data = await (await fetch(url)).json();
+      if (data.code !== 'Ok' || !data.routes || !data.routes[0]) throw new Error('no route');
+      const coords = data.routes[0].geometry.coordinates.map(([lon, lat]) => [lat, lon]);
+      routeLine = L.polyline(coords, { color: '#2dd4bf', weight: 4, opacity: 0.85 }).addTo(map);
+      distanceValue.textContent = formatDistance(data.routes[0].distance);
+      etaValue.textContent = formatEta(data.routes[0].duration / 60);
+      state.initialDistance = data.routes[0].distance;
     } catch (_) {
-      const straight = [[origin.lat, origin.lon], [destination.lat, destination.lon]];
-      routeLine = L.polyline(straight, { color: '#2dd4bf', weight: 3, opacity: 0.7, dashArray: '6 8' }).addTo(map);
+      routeLine = L.polyline([[origin.lat, origin.lon], [destination.lat, destination.lon]],
+        { color: '#2dd4bf', weight: 3, opacity: 0.7, dashArray: '6 8' }).addTo(map);
       const meters = haversineMeters(origin.lat, origin.lon, destination.lat, destination.lon);
       distanceValue.textContent = formatDistance(meters);
       etaValue.textContent = '—';
@@ -419,26 +355,16 @@
     }
   }
 
-  // ---------- Persistence (so a reload/crash doesn't lose your trip) ----------
+  // ---------- Persistence ----------
   function saveTripState() {
     try {
-      localStorage.setItem(STORAGE_KEY, JSON.stringify({
-        origin: state.origin,
-        destination: state.destination,
-        radius: state.radius,
-      }));
+      localStorage.setItem(STORAGE_KEY, JSON.stringify({ origin: state.origin, destination: state.destination, radius: state.radius }));
     } catch (_) { /* ignore */ }
   }
 
-  function loadTripState() {
-    try {
-      const raw = localStorage.getItem(STORAGE_KEY);
-      return raw ? JSON.parse(raw) : null;
-    } catch (_) { return null; }
-  }
-
   async function restoreTripState() {
-    const saved = loadTripState();
+    let saved = null;
+    try { saved = JSON.parse(localStorage.getItem(STORAGE_KEY) || 'null'); } catch (_) { /* ignore */ }
     if (!saved || !saved.origin || !saved.destination) return;
     state.origin = saved.origin;
     state.destination = saved.destination;
@@ -455,20 +381,11 @@
   }
 
   // ---------- Live tracking ----------
-  trackBtn.addEventListener('click', () => {
-    if (state.tracking) stopTracking();
-    else startTracking();
-  });
+  trackBtn.addEventListener('click', () => (state.tracking ? stopTracking() : startTracking()));
 
   function startTracking() {
-    if (!navigator.geolocation) {
-      setError('Geolocation is not supported on this device/browser.');
-      return;
-    }
-    if (!state.destination) {
-      setError('Preview a route first.');
-      return;
-    }
+    if (!navigator.geolocation) { setError('Geolocation is not supported on this device/browser.'); return; }
+    if (!state.destination) { setError('Preview a route first.'); return; }
     setError(null);
     state.tracking = true;
     state.arrived = false;
@@ -486,9 +403,7 @@
     acquireWakeLock();
 
     state.watchId = navigator.geolocation.watchPosition(onPosition, onPositionError, {
-      enableHighAccuracy: true,
-      maximumAge: 1000,
-      timeout: 20000,
+      enableHighAccuracy: true, maximumAge: 1000, timeout: 20000,
     });
   }
 
@@ -498,8 +413,7 @@
     state.tracking = false;
     trackBtn.textContent = 'Start tracking';
     trackBtn.classList.remove('is-danger');
-    mapPulse.classList.remove('is-tracking');
-    mapPulse.classList.remove('is-armed');
+    mapPulse.classList.remove('is-tracking', 'is-armed');
     recenterBtn.classList.remove('is-following');
     setStatus('idle', 'Location off');
     releaseWakeLock();
@@ -514,9 +428,8 @@
     const { latitude, longitude, speed, heading } = pos.coords;
     const now = pos.timestamp || Date.now();
 
-    // --- speed: prefer the device's own GPS-derived speed, else compute it ---
     let kmh = null;
-    if (typeof speed === 'number' && speed !== null && !Number.isNaN(speed) && speed >= 0) {
+    if (typeof speed === 'number' && !Number.isNaN(speed) && speed >= 0) {
       kmh = speed * 3.6;
     } else if (state.lastFix) {
       const distM = haversineMeters(state.lastFix.lat, state.lastFix.lon, latitude, longitude);
@@ -527,19 +440,13 @@
     kmh = Math.max(0, kmh);
     state.displaySpeed = state.displaySpeed * 0.65 + kmh * 0.35;
     if (state.displaySpeed < 0.6) state.displaySpeed = 0;
-
     state.lastFix = { lat: latitude, lon: longitude, t: now };
     speedValue.textContent = state.displaySpeed.toFixed(state.displaySpeed < 10 ? 1 : 0);
 
-    // --- heading: real GPS heading while moving, else fall back to the phone's compass ---
     let headingDeg = null;
-    if (typeof heading === 'number' && !Number.isNaN(heading) && state.displaySpeed > 0.8) {
-      headingDeg = heading;
-    } else if (state.deviceHeading !== null) {
-      headingDeg = state.deviceHeading;
-    }
+    if (typeof heading === 'number' && !Number.isNaN(heading) && state.displaySpeed > 0.8) headingDeg = heading;
+    else if (state.deviceHeading !== null) headingDeg = state.deviceHeading;
 
-    // --- marker + breadcrumb trail ---
     if (userMarker) {
       userMarker.setLatLng([latitude, longitude]);
       userMarker.setIcon(userArrowIcon(headingDeg ?? 0));
@@ -549,69 +456,84 @@
 
     traveledLatLngs.push([latitude, longitude]);
     if (traveledLatLngs.length > 1) {
-      if (traveledLine) {
-        traveledLine.setLatLngs(traveledLatLngs);
-      } else {
-        traveledLine = L.polyline(traveledLatLngs, { color: '#f5a623', weight: 4, opacity: 0.95, className: 'trail-glow' }).addTo(map);
-      }
+      if (traveledLine) traveledLine.setLatLngs(traveledLatLngs);
+      else traveledLine = L.polyline(traveledLatLngs, { color: '#f5a623', weight: 4, opacity: 0.95 }).addTo(map);
     }
 
-    if (state.followMode) {
-      map.setView([latitude, longitude], map.getZoom() < 14 ? 17 : map.getZoom(), { animate: true });
-    }
+    if (state.followMode) map.setView([latitude, longitude], map.getZoom() < 14 ? 17 : map.getZoom(), { animate: true });
 
-    // --- distance / eta / progress ---
     const dest = state.destination;
     const remaining = haversineMeters(latitude, longitude, dest.lat, dest.lon);
     distanceValue.textContent = formatDistance(remaining);
+    if (state.displaySpeed > 1) etaValue.textContent = formatEta((remaining / 1000 / state.displaySpeed) * 60);
 
-    if (state.displaySpeed > 1) {
-      etaValue.textContent = formatEta((remaining / 1000 / state.displaySpeed) * 60);
-    }
-
-    if (state.initialDistance === null || remaining > state.initialDistance) {
-      state.initialDistance = remaining;
-    }
-    const pct = state.initialDistance > 0
-      ? Math.min(100, Math.max(0, 100 - (remaining / state.initialDistance) * 100))
-      : 100;
+    if (state.initialDistance === null || remaining > state.initialDistance) state.initialDistance = remaining;
+    const pct = state.initialDistance > 0 ? Math.min(100, Math.max(0, 100 - (remaining / state.initialDistance) * 100)) : 100;
     progressFill.style.width = `${pct}%`;
     progressPct.textContent = `${Math.round(pct)}%`;
 
-    if (!state.arrived && remaining <= state.radius) {
-      triggerArrival(remaining);
-    }
+    if (!state.arrived && remaining <= state.radius) triggerArrival(remaining);
   }
 
-  // ---------- Compass (device orientation) ----------
+  // ---------- Compass (real On/Off toggle) ----------
+  let compassOn = false;
+  let compassEventName = null;
+
   function handleOrientation(e) {
-    let heading = null;
-    if (typeof e.webkitCompassHeading === 'number') {
-      heading = e.webkitCompassHeading; // iOS Safari: already 0 = north, clockwise
-    } else if (typeof e.alpha === 'number') {
-      heading = (360 - e.alpha) % 360; // best-effort for Android's absolute orientation
+    let h = null;
+    if (typeof e.webkitCompassHeading === 'number') h = e.webkitCompassHeading;          // iPhone
+    else if (typeof e.alpha === 'number' && (e.absolute || e.type === 'deviceorientationabsolute')) h = (360 - e.alpha) % 360; // Android
+    if (h === null || Number.isNaN(h)) return;
+    state.deviceHeading = h;
+    compassNeedle.style.transform = `rotate(${-h}deg)`;
+    headingReadout.textContent = `Heading ${Math.round(h)}° ${degToCompass(h)}`;
+    if (compassBtnLabel.textContent !== 'Compass: On') compassBtnLabel.textContent = 'Compass: On';
+  }
+
+  function setCompassUI(on, label) {
+    compassOn = on;
+    enableCompassBtn.classList.toggle('is-on', on);
+    enableCompassBtn.setAttribute('aria-pressed', String(on));
+    compassBadge.classList.toggle('is-on', on);
+    compassBtnLabel.textContent = label || (on ? 'Compass: On' : 'Compass: Off');
+  }
+
+  async function turnCompassOn() {
+    if (typeof DeviceOrientationEvent === 'undefined') {
+      setError('This device/browser does not support a live compass.');
+      return;
     }
-    if (heading === null || Number.isNaN(heading)) return;
-    state.deviceHeading = heading;
-    compassNeedle.style.transform = `rotate(${-heading}deg)`;
-    headingReadout.textContent = `Heading ${Math.round(heading)}° ${degToCompass(heading)}`;
+    // iPhone asks for permission; Android doesn't.
+    if (typeof DeviceOrientationEvent.requestPermission === 'function') {
+      const result = await DeviceOrientationEvent.requestPermission();
+      if (result !== 'granted') { setError('Compass permission was not granted.'); return; }
+    }
+    compassEventName = 'ondeviceorientationabsolute' in window ? 'deviceorientationabsolute' : 'deviceorientation';
+    window.addEventListener(compassEventName, handleOrientation, true);
+    setCompassUI(true, 'Compass: Starting…');
+    headingReadout.textContent = 'Heading — waiting for sensor';
+    const before = state.deviceHeading;
+    setTimeout(() => {
+      if (compassOn && state.deviceHeading === before) headingReadout.textContent = 'No compass sensor detected';
+    }, 3000);
+  }
+
+  function turnCompassOff() {
+    if (compassEventName) window.removeEventListener(compassEventName, handleOrientation, true);
+    compassEventName = null;
+    state.deviceHeading = null;
+    compassNeedle.style.transform = 'rotate(0deg)';
+    headingReadout.textContent = 'Heading —';
+    setCompassUI(false);
   }
 
   enableCompassBtn.addEventListener('click', async () => {
     try {
-      if (typeof DeviceOrientationEvent !== 'undefined' && typeof DeviceOrientationEvent.requestPermission === 'function') {
-        const result = await DeviceOrientationEvent.requestPermission();
-        if (result !== 'granted') {
-          setError('Compass permission was not granted.');
-          return;
-        }
-      }
-      window.addEventListener('deviceorientationabsolute', handleOrientation, true);
-      window.addEventListener('deviceorientation', handleOrientation, true);
-      enableCompassBtn.textContent = 'Compass on';
-      enableCompassBtn.disabled = true;
+      if (compassOn) turnCompassOff();
+      else await turnCompassOn();
     } catch (_) {
       setError('This device/browser does not support a live compass.');
+      turnCompassOff();
     }
   });
 
@@ -628,10 +550,7 @@
   }
 
   function startAlarmSound() {
-    if (!audioCtx) {
-      const AC = window.AudioContext || window.webkitAudioContext;
-      audioCtx = new AC();
-    }
+    if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)();
     if (audioCtx.state === 'suspended') audioCtx.resume();
     playBeep();
     alarmInterval = setInterval(playBeep, 650);
@@ -643,14 +562,15 @@
     [880, 1108].forEach((freq, i) => {
       const osc = audioCtx.createOscillator();
       const gain = audioCtx.createGain();
+      const t = t0 + i * 0.16;
       osc.type = 'sine';
-      osc.frequency.setValueAtTime(freq, t0 + i * 0.16);
-      gain.gain.setValueAtTime(0.0001, t0 + i * 0.16);
-      gain.gain.exponentialRampToValueAtTime(0.35, t0 + i * 0.16 + 0.02);
-      gain.gain.exponentialRampToValueAtTime(0.0001, t0 + i * 0.16 + 0.28);
+      osc.frequency.setValueAtTime(freq, t);
+      gain.gain.setValueAtTime(0.0001, t);
+      gain.gain.exponentialRampToValueAtTime(0.35, t + 0.02);
+      gain.gain.exponentialRampToValueAtTime(0.0001, t + 0.28);
       osc.connect(gain).connect(audioCtx.destination);
-      osc.start(t0 + i * 0.16);
-      osc.stop(t0 + i * 0.16 + 0.3);
+      osc.start(t);
+      osc.stop(t + 0.3);
     });
   }
 
@@ -665,38 +585,29 @@
     clearInterval(vibrateInterval);
     if (navigator.vibrate) navigator.vibrate(0);
     arrivalModal.classList.add('hidden');
-    mapPulse.classList.remove('is-armed');
-    setStatus('idle', 'Arrived — alarm stopped');
     stopTracking();
+    setStatus('idle', 'Arrived — alarm stopped');
   }
-
   stopAlarmBtn.addEventListener('click', stopAlarm);
 
-  // Unlock audio context on first user gesture (mobile browsers require this)
   document.addEventListener('click', () => {
     if (audioCtx && audioCtx.state === 'suspended') audioCtx.resume();
   }, { once: true });
 
-  // ---------- Screen Wake Lock (keep the screen/tab alive while tracking) ----------
+  // ---------- Screen Wake Lock ----------
   async function acquireWakeLock() {
     try {
       if ('wakeLock' in navigator) {
         wakeLock = await navigator.wakeLock.request('screen');
         wakeLock.addEventListener('release', () => { wakeLock = null; });
       }
-    } catch (_) { /* not critical — some browsers/contexts refuse this, that's fine */ }
+    } catch (_) { /* optional */ }
   }
-
   function releaseWakeLock() {
-    if (wakeLock) {
-      wakeLock.release().catch(() => {});
-      wakeLock = null;
-    }
+    if (wakeLock) { wakeLock.release().catch(() => {}); wakeLock = null; }
   }
 
-  // ---------- Recover from a backgrounded/discarded tab ----------
-  // Leaflet maps render blank after being hidden unless told to recalculate their size,
-  // and re-acquiring the wake lock after the OS silently drops it on background/lock.
+  // ---------- Recover from a backgrounded tab ----------
   document.addEventListener('visibilitychange', () => {
     if (document.visibilityState === 'visible') {
       map.invalidateSize();

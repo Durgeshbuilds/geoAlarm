@@ -264,21 +264,14 @@ body {
   align-items: center;
   justify-content: center;
 }
-
 .compass-ticks {
   position: absolute;
   inset: -6px;
   border-radius: 50%;
-  background:
-    repeating-conic-gradient(
-      from 0deg,
-      rgba(255,255,255,0.16) 0deg 1.2deg,
-      transparent 1.2deg 30deg
-    );
+  background: repeating-conic-gradient(from 0deg, rgba(255,255,255,0.16) 0deg 1.2deg, transparent 1.2deg 30deg);
   -webkit-mask: radial-gradient(farthest-side, transparent calc(100% - 10px), #000 calc(100% - 9px));
   mask: radial-gradient(farthest-side, transparent calc(100% - 10px), #000 calc(100% - 9px));
 }
-
 .map-ring {
   position: relative;
   width: 100%;
@@ -286,26 +279,18 @@ body {
   border-radius: 50%;
   overflow: hidden;
   border: 3px solid rgba(255,255,255,0.14);
-  box-shadow:
-    0 0 0 8px rgba(255,255,255,0.02),
-    0 25px 60px -20px rgba(0,0,0,0.8),
-    inset 0 0 30px rgba(0,0,0,0.35);
+  box-shadow: 0 0 0 8px rgba(255,255,255,0.02), 0 25px 60px -20px rgba(0,0,0,0.8), inset 0 0 30px rgba(0,0,0,0.35);
 }
-
-.map-ring.is-tracking {
-  animation: mapPulse 3s ease-in-out infinite;
-}
+.map-ring.is-tracking { animation: mapPulse 3s ease-in-out infinite; }
 @keyframes mapPulse {
-  0%, 100% { box-shadow: 0 0 0 8px rgba(245,166,35,0.05), 0 25px 60px -20px rgba(0,0,0,0.8), inset 0 0 30px rgba(0,0,0,0.35); }
-  50% { box-shadow: 0 0 0 14px rgba(245,166,35,0.10), 0 25px 60px -20px rgba(0,0,0,0.8), inset 0 0 30px rgba(0,0,0,0.35); }
+  0%, 100% { box-shadow: 0 0 0 8px rgba(245,166,35,0.05), 0 25px 60px -20px rgba(0,0,0,0.8); }
+  50% { box-shadow: 0 0 0 14px rgba(245,166,35,0.10), 0 25px 60px -20px rgba(0,0,0,0.8); }
 }
-
 .map-ring.is-armed { animation: mapPulseGreen 1.4s ease-in-out infinite; }
 @keyframes mapPulseGreen {
   0%, 100% { box-shadow: 0 0 0 8px rgba(52,211,153,0.10), 0 25px 60px -20px rgba(0,0,0,0.8); }
   50% { box-shadow: 0 0 0 18px rgba(52,211,153,0.22), 0 25px 60px -20px rgba(0,0,0,0.8); }
 }
-
 .ring-outline {
   position: absolute;
   inset: 0;
@@ -313,13 +298,11 @@ body {
   pointer-events: none;
   border: 1px solid rgba(255,255,255,0.06);
 }
-
 #map { width: 100%; height: 100%; background: #1a2033; }
 
-/* Hide default leaflet chrome that clashes with the glass HUD look */
-.leaflet-control-attribution { display: none !important; }
-.leaflet-control-zoom { display: none !important; }
-.leaflet-tile-pane { filter: saturate(0.85) brightness(0.95); }
+/* Leaflet chrome hidden — attribution is shown in text under the map instead */
+.leaflet-control-attribution, .leaflet-control-zoom { display: none !important; }
+.leaflet-tile-pane { filter: saturate(0.9) brightness(0.97); }
 
 /* Custom markers */
 .user-arrow {
@@ -342,7 +325,6 @@ body {
 
 .dest-pin { filter: drop-shadow(0 2px 5px rgba(45,212,191,0.6)); }
 
-.trail-glow { filter: drop-shadow(0 0 4px rgba(245,166,35,0.6)); }
 
 /* ---------- Recenter button ---------- */
 .recenter-btn {
@@ -446,4 +428,49 @@ body {
   .map-ring.is-tracking, .map-ring.is-armed, .user-arrow .halo, .status-pill.status-tracking .dot {
     animation: none !important;
   }
+}
+
+/* Google Maps HTML markers (rendered via OverlayView) */
+.user-arrow { position: relative; transition: transform 0.25s ease-out; }
+.user-arrow .halo { left: -8px; top: -8px; }
+
+/* ---------- Compass on/off toggle ---------- */
+.compass-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 14px;
+  border-radius: 999px;
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+  color: var(--text-muted);
+  background: rgba(255,255,255,0.05);
+  border: 1px solid var(--glass-border);
+  transition: background 0.2s ease, color 0.2s ease, border-color 0.2s ease;
+}
+.compass-toggle .toggle-dot {
+  width: 8px; height: 8px;
+  border-radius: 50%;
+  background: #64748b;
+  transition: background 0.2s ease, box-shadow 0.2s ease;
+}
+.compass-toggle:hover { background: rgba(255,255,255,0.09); }
+.compass-toggle:active { transform: scale(0.97); }
+
+.compass-toggle.is-on {
+  color: #dbeafe;
+  background: rgba(59,130,246,0.22);
+  border-color: rgba(96,165,250,0.6);
+}
+.compass-toggle.is-on .toggle-dot {
+  background: #60a5fa;
+  box-shadow: 0 0 8px #60a5fa;
+}
+
+/* Compass badge on the map glows blue while on */
+.compass-badge { transition: border-color 0.2s ease, box-shadow 0.2s ease; }
+.compass-badge.is-on {
+  border-color: rgba(96,165,250,0.7);
+  box-shadow: 0 0 12px rgba(96,165,250,0.35);
 }
