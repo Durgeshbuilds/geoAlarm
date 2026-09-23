@@ -170,12 +170,10 @@
   }
 
   function setStatus(mode, text) {
-    gpsStatus.className = 'status-pill';
-    if (mode === 'tracking') gpsStatus.classList.add('status-tracking');
-    if (mode === 'armed') gpsStatus.classList.add('status-armed');
-    if (mode === 'idle') gpsStatus.classList.add('status-idle');
-    gpsStatusText.textContent = text;
-  }
+  gpsStatus.className = 'status-pill';
+  gpsStatus.classList.add(`status-${mode}`);
+  gpsStatusText.textContent = text;
+}
 
   // ---------- Geocoding (Nominatim / OpenStreetMap — free, no key) ----------
   const geocodeCache = new Map();
@@ -420,11 +418,21 @@
   }
 
   function onPositionError(err) {
-    setError('GPS error: ' + describeGeoError(err));
-    setStatus('idle', 'Signal lost');
+  if (err.code === err.PERMISSION_DENIED) {
+    // Permission blocked: tracking is impossible, so fully stop it.
+    stopTracking();
+    setStatus('blocked', 'Location blocked');
+    setError('Location is blocked for this site. Click the location icon in the address bar and choose Allow, then start tracking again.');
+    return;
   }
+  // Weak GPS / timeout: keep tracking — the signal usually comes back.
+  setStatus('idle', 'Signal lost');
+  setError('Weak GPS signal — still trying…');
+}
 
   function onPosition(pos) {
+    setStatus('tracking', 'Tracking live');
+    setError(null);
     const { latitude, longitude, speed, heading } = pos.coords;
     const now = pos.timestamp || Date.now();
 
@@ -514,7 +522,11 @@
     headingReadout.textContent = 'Heading — waiting for sensor';
     const before = state.deviceHeading;
     setTimeout(() => {
-      if (compassOn && state.deviceHeading === before) headingReadout.textContent = 'No compass sensor detected';
+      if (compassOn && state.deviceHeading === before) {
+        turnCompassOff();
+        compassBtnLabel.textContent = 'Compass: Unavailable';
+        headingReadout.textContent = 'No compass sensor on this device';
+      }
     }, 3000);
   }
 
